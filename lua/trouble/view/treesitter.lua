@@ -86,10 +86,15 @@ function M._attach_lang(buf, lang, regions)
       highlighter = TSHighlighter.new(parser),
     }
   end
+
   M.cache[buf][lang].enabled = true
   local parser = M.cache[buf][lang].parser
-
   parser:set_included_regions(vim.deepcopy(regions))
+
+  -- Force re-parse so all regions get highlighted, not just visible ones
+  pcall(function()
+    parser:parse(true) -- true = parse all regions, not just visible
+  end)
 end
 
 return M
