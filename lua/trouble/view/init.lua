@@ -131,18 +131,20 @@ function M:on_mount()
 
   self:listen()
   self.win:on("WinLeave", function()
-    if self.opts.preview.type == "main" and self.clicked:is_active() and Preview.is_open() then
-      local main = self.preview_win.opts.win
-      local preview = self.preview_win.win
-      if main and preview and vim.api.nvim_win_is_valid(main) and vim.api.nvim_win_is_valid(preview) then
-        local view = vim.api.nvim_win_call(preview, vim.fn.winsaveview)
-        vim.api.nvim_win_call(main, function()
-          vim.fn.winrestview(view)
-        end)
-        vim.api.nvim_set_current_win(main)
+    vim.schedule(function()
+      if self.opts.preview.type == "main" and self.clicked:is_active() and Preview.is_open() then
+        local main = self.preview_win.opts.win
+        local preview = self.preview_win.win
+        if main and preview and vim.api.nvim_win_is_valid(main) and vim.api.nvim_win_is_valid(preview) then
+          local view = vim.api.nvim_win_call(preview, vim.fn.winsaveview)
+          vim.api.nvim_win_call(main, function()
+            vim.fn.winrestview(view)
+          end)
+          vim.api.nvim_set_current_win(main)
+        end
       end
-    end
-    Preview.close()
+      Preview.close()
+    end)
   end)
 
   local _self = Util.weak(self)
@@ -503,10 +505,12 @@ function M:open()
 end
 
 function M:close()
+  Preview.close()
+
   if vim.api.nvim_get_current_win() == self.win.win then
     self:goto_main()
   end
-  Preview.close()
+
   self.win:close()
   return self
 end

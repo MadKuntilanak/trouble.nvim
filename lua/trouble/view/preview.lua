@@ -5,9 +5,10 @@ local Util = require("trouble.util")
 
 local M = {}
 M.preview = nil ---@type trouble.Preview?
+M._closing = false -- guard flag to prevent re-entrant/double close
 
 function M.is_open()
-  return M.preview ~= nil
+  return M.preview ~= nil and M._closing == false
 end
 
 function M.is_win(win)
@@ -19,13 +20,32 @@ function M.item()
 end
 
 function M.close()
+  if M._closing then
+    return
+  end
+
   local preview = M.preview
-  M.preview = nil
   if not preview then
     return
   end
-  Render.reset(preview.buf)
-  preview.close()
+
+  M._closing = true
+  M.preview = nil
+
+  -- Validate the preview window is still alive before resetting extmarks.
+  -- The win number could have been recycled by Neovim after a previous close.
+  local win_valid = preview.win and vim.api.nvim_win_is_valid(preview.win)
+  if win_valid then
+    -- Only reset marks on the buf that belongs to this preview window.
+    local current_buf = vim.api.nvim_win_get_buf(preview.win)
+    if current_buf == preview.buf then
+      Render.reset(preview.buf)
+    end
+  end
+
+  pcall(preview.close)
+
+  M._closing = false
 end
 
 --- Create a preview buffer for an item.
@@ -83,6 +103,11 @@ function M.open(view, item, opts)
   if M.item() == item then
     return
   end
+
+  -- Close existing preview only when the file actually changes.
+  -- Previously this was done unconditionally, which caused flicker and
+  -- left the preview_win in an inconsistent state when items in the same
+  -- file were navigated quickly.
   if M.preview and M.preview.item.filename ~= item.filename then
     M.close()
   end
@@ -93,11 +118,20 @@ function M.open(view, item, opts)
       return
     end
 
-    M.preview = M.preview_win(buf, view)
+    local pw = M.preview_win(buf, view)
+    if not pw then
+      return
+    end
 
+    M.preview = pw
     M.preview.buf = buf
   end
   M.preview.item = item
+
+  if not vim.api.nvim_win_is_valid(M.preview.win) then
+    M.preview = nil
+    return
+  end
 
   Render.reset(M.preview.buf)
 
@@ -162,10 +196,13 @@ function M.preview_win(buf, view)
     vim.w[view.preview_win.win].trouble_preview = true
   end)
 
+  local captured_win = view.preview_win
   return {
     win = view.preview_win.win,
     close = function()
-      view.preview_win:close()
+      if captured_win and captured_win.win and vim.api.nvim_win_is_valid(captured_win.win) then
+        captured_win:close()
+      end
     end,
   }
 end
