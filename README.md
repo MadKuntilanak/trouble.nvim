@@ -93,6 +93,11 @@ Install the plugin with your preferred package manager:
       "<cmd>Trouble qflist toggle<cr>",
       desc = "Quickfix List (Trouble)",
     },
+    {
+      "<leader>xR",
+      "<cmd>Trouble resume<cr>",
+      desc = "Resume last action (Trouble)",
+    },
   },
 }
 ```
@@ -269,44 +274,44 @@ local defaults = {
   icons = {
     ---@type trouble.Indent.symbols
     indent = {
-      top           = "│ ",
-      middle        = "├╴",
-      last          = "└╴",
+      top = "│ ",
+      middle = "├╴",
+      last = "└╴",
       -- last          = "-╴",
       -- last       = "╰╴", -- rounded
-      fold_open     = " ",
-      fold_closed   = " ",
-      ws            = "  ",
+      fold_open = " ",
+      fold_closed = " ",
+      ws = "  ",
     },
-    folder_closed   = " ",
-    folder_open     = " ",
+    folder_closed = " ",
+    folder_open = " ",
     kinds = {
-      Array         = " ",
-      Boolean       = "󰨙 ",
-      Class         = " ",
-      Constant      = "󰏿 ",
-      Constructor   = " ",
-      Enum          = " ",
-      EnumMember    = " ",
-      Event         = " ",
-      Field         = " ",
-      File          = " ",
-      Function      = "󰊕 ",
-      Interface     = " ",
-      Key           = " ",
-      Method        = "󰊕 ",
-      Module        = " ",
-      Namespace     = "󰦮 ",
-      Null          = " ",
-      Number        = "󰎠 ",
-      Object        = " ",
-      Operator      = " ",
-      Package       = " ",
-      Property      = " ",
-      String        = " ",
-      Struct        = "󰆼 ",
+      Array = " ",
+      Boolean = "󰨙 ",
+      Class = " ",
+      Constant = "󰏿 ",
+      Constructor = " ",
+      Enum = " ",
+      EnumMember = " ",
+      Event = " ",
+      Field = " ",
+      File = " ",
+      Function = "󰊕 ",
+      Interface = " ",
+      Key = " ",
+      Method = "󰊕 ",
+      Module = " ",
+      Namespace = "󰦮 ",
+      Null = " ",
+      Number = "󰎠 ",
+      Object = " ",
+      Operator = " ",
+      Package = " ",
+      Property = " ",
+      String = " ",
+      Struct = "󰆼 ",
       TypeParameter = " ",
-      Variable      = "󰀫 ",
+      Variable = "󰀫 ",
     },
   },
 }
@@ -419,6 +424,10 @@ require("trouble").refresh(opts)
 ---@param opts? trouble.Mode|string
 require("trouble").get_items(opts)
 
+-- Resume last actions
+---@param opts? trouble.Mode|string
+require("trouble").resume(opts)
+
 -- Renders a trouble list as a statusline component.
 -- Check the docs for examples.
 ---@param opts? trouble.Mode|string|{hl_group?:string}
@@ -451,7 +460,7 @@ require("trouble").first(opts)
 ---@return trouble.View
 require("trouble").focus(opts)
 
--- Fold close 
+-- Fold close
 ---@param opts? trouble.Mode | { new? : boolean } | string
 ---@return trouble.View
 require("trouble").fold_close(opts)
@@ -481,7 +490,7 @@ require("trouble").fold_enable(opts)
 ---@return trouble.View
 require("trouble").fold_more(opts)
 
--- Fold open 
+-- Fold open
 ---@param opts? trouble.Mode | { new? : boolean } | string
 ---@return trouble.View
 require("trouble").fold_open(opts)
@@ -501,7 +510,7 @@ require("trouble").fold_open_recursive(opts)
 ---@return trouble.View
 require("trouble").fold_reduce(opts)
 
--- Fold toggle 
+-- Fold toggle
 ---@param opts? trouble.Mode | { new? : boolean } | string
 ---@return trouble.View
 require("trouble").fold_toggle(opts)

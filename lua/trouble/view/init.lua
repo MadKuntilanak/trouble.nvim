@@ -34,6 +34,20 @@ M._auto = {}
 ---@type table<string, trouble.Render.Location>
 M._last = {}
 
+--- History of closed views, used by `M.resume()`.
+--- Stores enough state to re-open a view as it was before closing.
+---@class trouble.View.Snapshot
+---@field opts trouble.Mode              Deep-copy of view opts at close time
+---@field cursor number[]                Cursor row/col inside the trouble buffer
+---@field loc? trouble.Render.Location  Item the cursor was on
+---@field filters table<string, trouble.ViewFilter>  Active filters at close time
+
+--- Keyed by mode string → most-recent snapshot for that mode.
+--- The special key "" holds the most-recently closed view of *any* mode,
+--- so `Trouble resume` with no argument always works.
+---@type table<string, trouble.View.Snapshot>
+M._history = {}
+
 M.MOVING_DELAY = 4000
 
 local uv = vim.loop or vim.uv
@@ -243,9 +257,13 @@ end
 function M:jump(item, opts)
   opts = opts or {}
   item = item or self:at().item
-  vim.schedule(function()
-    Preview.close()
-  end)
+
+  -- FIX: Close preview synchronously here (before WinLeave fires) so the
+  -- deferred WinLeave handler finds Preview.is_open() == false and skips
+  -- the redundant close.  This prevents the double-close race described in
+  -- the WinLeave handler above.
+  Preview.close()
+
   if not item then
     return Util.warn("No item to jump to")
   end
@@ -329,7 +347,13 @@ end
 
 ---@param cursor? number[]
 function M:at(cursor)
+  if not self.win.buf or type(self.win.buf) ~= "number" then
+    return {}
+  end
   if not vim.api.nvim_buf_is_valid(self.win.buf) then
+    return {}
+  end
+  if not self.win.win or not vim.api.nvim_win_is_valid(self.win.win) then
     return {}
   end
   cursor = cursor or vim.api.nvim_win_get_cursor(self.win.win)
@@ -427,6 +451,16 @@ function M:refresh(opts)
   if not (opts.opening or self.win:valid() or self.opts.auto_open) then
     return
   end
+  -- When _frozen is set (resume path), skip all source queries and just
+  -- trigger an update/render with the already-loaded items.
+  if self._frozen then
+    return Promise.all(vim.tbl_map(function(section)
+      return Promise.new(function(resolve)
+        section:update()
+        resolve(section)
+      end)
+    end, self.sections))
+  end
   ---@param section trouble.Section
   return Promise.all(vim.tbl_map(function(section)
     return section:refresh(opts)
@@ -486,9 +520,11 @@ function M:open()
       if count == 0 then
         if not self.opts.open_no_results then
           if self.opts.warn_no_results then
+            local main = self:main()
+            local bufname = main and main.buf and vim.api.nvim_buf_get_name(main.buf) or ""
             Util.warn({
               "No results for **" .. self.opts.mode .. "**",
-              "Buffer: " .. vim.api.nvim_buf_get_name(self:main().buf),
+              "Buffer: " .. bufname,
             })
           end
           return
@@ -505,14 +541,135 @@ function M:open()
 end
 
 function M:close()
+  -- Only save a resume snapshot when the trouble window was actually open
+  -- and visible. If close() is called from the auto_jump path (count == 1,
+  -- window never opened), there is nothing meaningful to resume.
+  if self.win:valid() then
+    local sections_data = {}
+    for i, section in ipairs(self.sections) do
+      sections_data[i] = {
+        items = section.items,
+        node = section.node,
+      }
+    end
+    local snapshot = {
+      opts = vim.deepcopy(self.opts),
+      cursor = vim.api.nvim_win_get_cursor(self.win.win),
+      loc = self:at(),
+      filters = vim.deepcopy(self._filters),
+      sections_data = sections_data,
+    }
+    local mode = self.opts.mode or ""
+    M._history[mode] = snapshot
+    M._history[""] = snapshot
+  end
+
   Preview.close()
 
-  if vim.api.nvim_get_current_win() == self.win.win then
+  if self.win.win and vim.api.nvim_win_is_valid(self.win.win) and vim.api.nvim_get_current_win() == self.win.win then
     self:goto_main()
   end
 
   self.win:close()
   return self
+end
+
+--- Resume the last closed Trouble view, or a specific mode's last session.
+---
+--- Usage from command line / keymaps:
+---   :Trouble resume                   -- re-open whatever was closed last
+---   :Trouble resume mode=diagnostics  -- re-open last diagnostics session
+---
+--- The view is re-opened with:
+---   - the same mode and window opts (type, position, size, …)
+---   - the same active filters
+---   - the cursor restored to the same item it was on
+---
+---@param opts? {mode?: string}  Optional override; if omitted uses last-closed
+function M.resume(opts)
+  opts = opts or {}
+  local key = opts.mode or ""
+
+  local snap = M._history[key]
+  if not snap then
+    if key ~= "" then
+      snap = M._history[""]
+    end
+    if not snap then
+      Util.warn("No previous Trouble session to resume" .. (key ~= "" and (" for mode: " .. key) or ""))
+      return
+    end
+  end
+
+  -- Merge caller opts on top of the saved opts so the user can tweak things
+  -- like win.position without losing the rest of the session state.
+  ---@type trouble.Mode
+  local restored_opts = vim.tbl_deep_extend("force", vim.deepcopy(snap.opts), opts)
+
+  -- If a view for this mode is already open just focus it.
+  local existing = M.get({ mode = restored_opts.mode, open = true })
+  if #existing > 0 then
+    local view = existing[1].view
+    if view.win:valid() then
+      view.win:focus()
+      return view
+    end
+  end
+
+  restored_opts.auto_refresh = false
+  restored_opts.auto_jump = false
+
+  local view = M.new(restored_opts)
+
+  -- Restore filters.
+  view._filters = vim.deepcopy(snap.filters)
+  local filters = vim.tbl_count(view._filters) > 0
+      and vim.tbl_map(function(f)
+        return f.filter
+      end, vim.tbl_values(view._filters))
+    or nil
+
+  -- Inject frozen items + pre-built node tree directly into each section.
+  -- This bypasses section:refresh() entirely so the LSP is never re-queried.
+  for i, section in ipairs(view.sections) do
+    local sd = snap.sections_data and snap.sections_data[i]
+    if sd then
+      section.items = sd.items or {}
+      section.node = sd.node
+    end
+    section.filter = filters
+  end
+
+  -- Restore cursor position via M._last so render() picks it up.
+  if snap.loc and snap.loc.node then
+    M._last[restored_opts.mode or ""] = snap.loc
+  end
+
+  -- Freeze the view so M:refresh() skips LSP queries and just re-renders
+  -- the already-injected items. Unfrozen after the first render completes.
+  view._frozen = true
+
+  -- Open without triggering a source refresh — pass update=false so the
+  -- opening path skips section:refresh() and goes straight to render.
+  -- view:open() internally calls refresh({opening=true}) which calls
+  -- section:refresh() → we override that by pre-filling items above and
+  -- ensuring auto_refresh=false so nothing clobbers our frozen data.
+  view:open()
+  view:wait(function()
+    if view.win:valid() then
+      local row = snap.cursor[1]
+      local max = vim.api.nvim_buf_line_count(view.win.buf)
+      if row > max then
+        row = max
+      end
+      pcall(vim.api.nvim_win_set_cursor, view.win.win, { row, snap.cursor[2] })
+    end
+    -- Unfreeze: future manual :Trouble refresh or auto_refresh events
+    -- are allowed again after the resume render is done.
+    view._frozen = false
+  end)
+
+  return view
 end
 
 function M:count()

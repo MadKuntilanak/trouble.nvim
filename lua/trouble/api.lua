@@ -141,6 +141,24 @@ function M.get_items(opts)
   return ret
 end
 
+-- Re-opens the last closed Trouble view (or last closed view for a given mode).
+-- Restores: mode, window layout, active filters, and cursor position.
+--
+-- Examples:
+--   :Trouble resume
+--   :Trouble resume mode=diagnostics
+--
+---@param opts? trouble.Mode|string
+---@return trouble.View?
+function M.resume(opts)
+  opts = Config.get(opts)
+  if opts.mode == "last" then
+    opts.mode = M.last_mode
+    opts = Config.get(opts)
+  end
+  return View.resume(opts)
+end
+
 -- Renders a trouble list as a statusline component.
 -- Check the docs for examples.
 ---@param opts? trouble.Mode|string|{hl_group?:string}
