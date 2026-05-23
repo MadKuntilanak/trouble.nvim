@@ -258,10 +258,6 @@ function M:jump(item, opts)
   opts = opts or {}
   item = item or self:at().item
 
-  -- FIX: Close preview synchronously here (before WinLeave fires) so the
-  -- deferred WinLeave handler finds Preview.is_open() == false and skips
-  -- the redundant close.  This prevents the double-close race described in
-  -- the WinLeave handler above.
   Preview.close()
 
   if not item then

@@ -75,10 +75,7 @@ function M.create(item, opts)
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
       local ft = item:get_ft(buf)
       if ft then
-        local lang = vim.treesitter.language.get_lang(ft)
-        if not pcall(vim.treesitter.start, buf, lang) then
-          vim.bo[buf].syntax = ft
-        end
+        vim.bo[buf].filetype = ft
       end
     else
       item.buf = vim.fn.bufadd(item.filename)
@@ -190,10 +187,41 @@ function M.preview_win(buf, view)
   end
 
   view.preview_win:open()
+  view.preview_win:set_buf(buf)
+
   Util.noautocmd(function()
-    view.preview_win:set_buf(buf)
     view.preview_win:set_options("win")
     vim.w[view.preview_win.win].trouble_preview = true
+  end)
+
+  -- Ensure treesitter / syntax is active on the buffer now that it has a
+  -- real window.  For scratch buffers the parser was started before the
+  -- window existed; for real buffers that were loaded without ever being
+  -- displayed, FileType may not have fired yet.
+  vim.schedule(function()
+    if not vim.api.nvim_buf_is_valid(buf) then
+      return
+    end
+    local win = view.preview_win.win
+    if not (win and vim.api.nvim_win_is_valid(win)) then
+      return
+    end
+    -- Only touch the buf that's actually in the preview window.
+    if vim.api.nvim_win_get_buf(win) ~= buf then
+      return
+    end
+
+    -- Try treesitter first; fall back to legacy syntax.
+    local ft = vim.bo[buf].filetype
+    if ft and ft ~= "" then
+      local lang = vim.treesitter.language.get_lang(ft)
+      -- pcall: parser may not be installed; that's fine.
+      if not pcall(vim.treesitter.start, buf, lang) then
+        if vim.bo[buf].syntax == "" then
+          vim.bo[buf].syntax = ft
+        end
+      end
+    end
   end)
 
   local captured_win = view.preview_win
