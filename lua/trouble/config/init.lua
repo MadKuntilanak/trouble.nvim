@@ -4,6 +4,7 @@ local M = {}
 ---@class trouble.Mode: trouble.Config,trouble.Section.spec
 ---@field desc? string
 ---@field sections? string[]
+---@field open_mode? string
 
 ---@class trouble.Config
 ---@field mode? string
@@ -27,6 +28,7 @@ local defaults = {
   pinned = false, -- When pinned, the opened trouble window will be bound to the current buffer
   warn_no_results = true, -- show a warning when there are no results
   open_no_results = false, -- open the trouble window when there are no results
+  open_mode = "default", -- open mode e.g 'vsplit' 'split' 'tabnew' | default
   ---@type trouble.Window.opts
   win = {}, -- window options for the results window. Can be a split or a floating window.
   -- Window options for the preview window. Can be a split, floating window,

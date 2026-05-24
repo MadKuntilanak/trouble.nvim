@@ -98,6 +98,11 @@ Install the plugin with your preferred package manager:
       "<cmd>Trouble resume<cr>",
       desc = "Resume last action (Trouble)",
     },
+    {
+      "<leader>cv",
+      "<cmd>Trouble lsp toggle focus=false open_mode=vsplit<cr>",
+      desc = "LSP Definitions / references / ... (Trouble)",
+    },
   },
 }
 ```

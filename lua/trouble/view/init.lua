@@ -526,6 +526,9 @@ function M:open()
           return
         end
       elseif count == 1 and self.opts.auto_jump then
+        if self.opts.open_mode and self.opts.open_mode ~= "default" then
+          vim.cmd(self.opts.open_mode)
+        end
         self:jump(self:flatten()[1])
         return self:close()
       end
