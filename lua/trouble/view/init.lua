@@ -211,6 +211,29 @@ function M:on_mount()
     end
   end, { pattern = "foldlevel", buffer = false })
 
+  -- Re-open preview when trouble window is resized (e.g. expanded upward),
+  -- so the preview window repositions itself relative to the new trouble height.
+  self.win:on("WinResized", function()
+    local this = _self()
+    if not this then
+      return true
+    end
+    if not this.win:valid() then
+      return
+    end
+    -- Only act when our trouble window was among the resized windows
+    local resized = vim.v.event and vim.v.event.windows or {}
+    if not vim.tbl_contains(resized, this.win.win) then
+      return
+    end
+    if Preview.is_open() then
+      local loc = this:at()
+      if loc and loc.item then
+        preview(this, loc.item)
+      end
+    end
+  end, { buffer = false })
+
   for k, v in pairs(self.opts.keys) do
     if v ~= false then
       self:map(k, v)
