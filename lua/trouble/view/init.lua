@@ -67,6 +67,10 @@ function M.new(opts)
     self:on_mount()
   end
   self.opts.win.on_close = function()
+    -- Always close preview when trouble window is closed, regardless of how
+    -- it was triggered (q keymap, :q, WinClosed, etc). This is the last-resort
+    -- safety net for cases where WinLeave fires late or out of order.
+    Preview.close()
     if not self.opts.auto_open then
       for _, section in ipairs(self.sections) do
         section:stop()
@@ -146,6 +150,14 @@ function M:on_mount()
   self:listen()
   self.win:on("WinLeave", function()
     vim.schedule(function()
+      -- If the trouble window is already closed (e.g. user pressed q), skip —
+      -- on_close already handled Preview.close(). Without this guard the
+      -- deferred WinLeave can fire after close and leave preview orphaned in
+      -- the reverse race: q closes trouble, then a pending CursorMoved or
+      -- WinLeave callback re-opens / fails to close the preview.
+      if not self.win:valid() then
+        return
+      end
       if self.opts.preview.type == "main" and self.clicked:is_active() and Preview.is_open() then
         local main = self.preview_win.opts.win
         local preview = self.preview_win.win
