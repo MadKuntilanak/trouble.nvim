@@ -288,7 +288,7 @@ function M:fold_level(opts)
 end
 
 ---@param item? trouble.Item
----@param opts? {split?: boolean, vsplit?:boolean}
+---@param opts? {split?: boolean, vsplit?:boolean, aboveleft?:boolean}
 function M:jump(item, opts)
   opts = opts or {}
   item = item or self:at().item
@@ -322,7 +322,7 @@ function M:jump(item, opts)
 
   if opts.split then
     vim.api.nvim_win_call(win, function()
-      vim.cmd("split")
+      vim.cmd((opts.aboveleft and "aboveleft ") .. "split")
       win = vim.api.nvim_get_current_win()
     end)
   elseif opts.vsplit then
@@ -333,11 +333,13 @@ function M:jump(item, opts)
   end
 
   vim.api.nvim_win_set_buf(win, item.buf)
-  -- order of the below seems important with splitkeep=screen
   vim.api.nvim_set_current_win(win)
   vim.api.nvim_win_set_cursor(win, item.pos)
-  vim.api.nvim_win_call(win, function()
-    vim.cmd("norm! zzzv")
+
+  vim.schedule(function()
+    vim.api.nvim_win_call(win, function()
+      vim.cmd("norm! zzzv")
+    end)
   end)
   return item
 end

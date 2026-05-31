@@ -114,6 +114,12 @@ local M = {
       self:jump(ctx.item, { split = true })
     end
   end,
+  jump_split_aboveleft_close = function(self, ctx)
+    if ctx.item then
+      self:jump(ctx.item, { split = true, aboveleft = true })
+      self:close()
+    end
+  end,
   -- Open the item in a split and close the trouble window
   jump_split_close = function(self, ctx)
     if ctx.item then
