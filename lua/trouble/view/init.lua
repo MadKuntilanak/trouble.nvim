@@ -22,6 +22,7 @@ local Window = require("trouble.view.window")
 ---@field state table<string,any>
 ---@field _filters table<string, trouble.ViewFilter>
 ---@field private _main? trouble.Main
+---@field _frozen boolean
 local M = {}
 M.__index = M
 local _idx = 0
@@ -306,9 +307,9 @@ function M:jump(item, opts)
 
   item.buf = item.buf or vim.fn.bufadd(item.filename)
 
-  if not vim.api.nvim_buf_is_loaded(item.buf) then
-    vim.fn.bufload(item.buf)
-  end
+  -- if not vim.api.nvim_buf_is_loaded(item.buf) then
+  --   vim.fn.bufload(item.buf)
+  -- end
   if not vim.bo[item.buf].buflisted then
     vim.bo[item.buf].buflisted = true
   end
@@ -543,6 +544,9 @@ function M:is_open()
 end
 
 function M:open()
+  -- Close it first, whatever it is.
+  self:close()
+
   if self.win:valid() then
     return self
   end
@@ -698,7 +702,7 @@ function M.resume(opts)
       if row > max then
         row = max
       end
-      pcall(vim.api.nvim_win_set_cursor, view.win.win, { row, snap.cursor[2] })
+      view.win:focus()
     end
     -- Unfreeze: future manual :Trouble refresh or auto_refresh events
     -- are allowed again after the resume render is done.

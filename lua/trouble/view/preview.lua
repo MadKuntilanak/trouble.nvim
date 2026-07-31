@@ -81,9 +81,9 @@ function M.create(item, opts)
       item.buf = vim.fn.bufadd(item.filename)
       buf = item.buf
 
-      if not vim.api.nvim_buf_is_loaded(item.buf) then
-        vim.fn.bufload(item.buf)
-      end
+      -- if not vim.api.nvim_buf_is_loaded(item.buf) then
+      --   vim.fn.bufload(item.buf)
+      -- end
       if not vim.bo[item.buf].buflisted then
         vim.bo[item.buf].buflisted = true
       end
