@@ -602,6 +602,7 @@ function M:close()
     local mode = self.opts.mode or ""
     M._history[mode] = snapshot
     M._history[""] = snapshot
+    M._history[self:main().win] = snapshot
   end
 
   Preview.close()
@@ -626,11 +627,15 @@ end
 ---   - the cursor restored to the same item it was on
 ---
 ---@param opts? {mode?: string}  Optional override; if omitted uses last-closed
-function M.resume(opts)
+function M:resume(opts)
   opts = opts or {}
-  local key = opts.mode or ""
 
-  local snap = M._history[key]
+  local curwin = vim.api.nvim_get_current_win()
+  local snap
+
+  local key = opts.mode or ""
+  snap = M._history[curwin] or M._history[key]
+
   if not snap then
     if key ~= "" then
       snap = M._history[""]
@@ -647,12 +652,14 @@ function M.resume(opts)
   local restored_opts = vim.tbl_deep_extend("force", vim.deepcopy(snap.opts), opts)
 
   -- If a view for this mode is already open just focus it.
-  local existing = M.get({ mode = restored_opts.mode, open = true })
-  if #existing > 0 then
-    local view = existing[1].view
-    if view.win:valid() then
-      view.win:focus()
-      return view
+  if not snap then
+    local existing = M.get({ mode = restored_opts.mode, open = true })
+    if #existing > 0 then
+      local view = existing[1].view
+      if view.win:valid() then
+        view.win:focus()
+        return view
+      end
     end
   end
 
