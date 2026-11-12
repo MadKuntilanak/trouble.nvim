@@ -158,10 +158,6 @@ for _, mode in ipairs({ "definitions", "references", "implementations", "type_de
 end
 
 ---@class trouble.lsp.Response<R,P>: {client: vim.lsp.Client, result: R, err: lsp.ResponseError, params: P}
-
----@param method string
----@param params? table|fun(client:vim.lsp.Client):table
----@param opts? {client?:vim.lsp.Client}
 function M.request(method, params, opts)
   opts = opts or {}
   local buf = vim.api.nvim_get_current_buf()
@@ -176,14 +172,13 @@ function M.request(method, params, opts)
     else
       ---@diagnostic disable-next-line: deprecated
       clients = vim.lsp.get_active_clients({ bufnr = buf })
-      ---@param client vim.lsp.Client
       clients = vim.tbl_filter(function(client)
+        ---@diagnostic disable-next-line: missing-parameter
         return client.supports_method(method)
       end, clients)
     end
   end
 
-  ---@param client vim.lsp.Client
   return Promise.all(vim.tbl_map(function(client)
     return Promise.new(function(resolve)
       local p = type(params) == "function" and params(client) or params --[[@as table]]
@@ -192,6 +187,7 @@ function M.request(method, params, opts)
             return client.request(...)
           end
         or client.request
+      ---@diagnostic disable-next-line: param-type-mismatch, missing-parameter
       request(client, method, p, function(err, result)
         resolve({ client = client, result = result, err = err, params = p })
       end, buf)
@@ -388,9 +384,11 @@ function M.get_items(client, locations, opts)
   fname = vim.fs.normalize(fname)
 
   if not opts.include_current then
-    ---@param item trouble.Item
     items = vim.tbl_filter(function(item)
-      return not (item.filename == fname and Filter.overlaps(cursor, item, { lines = true }))
+      ---@cast item trouble.Item
+      return not (
+        item.filename == fname and Filter.overlaps(cursor, item --[[@as trouble.Range]], { lines = true })
+      )
     end, items)
   end
 
@@ -537,8 +535,9 @@ function M.locations_to_ranges(client, locs)
   local ret = {} ---@type table<lsp.Loc,trouble.Range.lsp>
 
   for uri, t in pairs(todo) do
-    local buf = vim.uri_to_bufnr(uri)
-    local filename = vim.uri_to_fname(uri)
+    local scheme = uri:match("^([%w+.-]+):")
+    local filename = vim.uri.to_fname(uri)
+    local buf = vim.fn.bufadd(scheme == "file" and filename or uri)
     local lines = Util.get_lines({ rows = vim.tbl_keys(t.rows), buf = buf }) or {}
     for _, loc in ipairs(t.locs) do
       local range = loc.range or loc.targetSelectionRange
