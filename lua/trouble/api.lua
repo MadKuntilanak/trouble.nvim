@@ -1,4 +1,4 @@
-local Actions = require("trouble.config.actions")
+-- local Actions = require("trouble.config.actions")
 local Config = require("trouble.config")
 local Util = require("trouble.util")
 local View = require("trouble.view")

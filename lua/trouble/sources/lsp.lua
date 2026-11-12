@@ -95,23 +95,65 @@ M.config = {
   },
 }
 
+local icons = {
+  definitions = vim.fn.nr2char(0xf121), --
+  references = vim.fn.nr2char(0xf0c1), --
+  implementations = vim.fn.nr2char(0xf0e8), --
+  type_definitions = vim.fn.nr2char(0xf1b2), --
+  declarations = vim.fn.nr2char(0xf02d), --
+  incoming_calls = vim.fn.nr2char(0xf090), --
+  outgoing_calls = vim.fn.nr2char(0xf08b), --
+  command = vim.fn.nr2char(0xf120), --
+}
+
+local styles = {
+  badge = "{hl:TroubleLspTitleIcon}%s{hl} {hl:Title}%s{hl} {hl:TroubleLspTitleSep}{hl} {hl:TroubleLspTitleWord}%s{hl}",
+  arrow = "{hl:TroubleLspTitleIcon}%s{hl} {hl:Title}%s{hl} {hl:TroubleLspTitleSep}›{hl} {hl:TroubleLspTitleWord}%s{hl}",
+  angle = "{hl:TroubleLspTitleIcon}%s{hl} {hl:Title}%s{hl} {hl:TroubleLspTitleSep}⟨{hl}{hl:TroubleLspTitleWord}%s{hl}{hl:TroubleLspTitleSep}⟩{hl}",
+}
+
+-- NOTE: should this be configurable instead?
+-- Letting users define it themselves would be more flexible.
+local style = styles.arrow
+
+---@param mode string
+---@param label string
+---@return fun(opts: trouble.Mode)
+local function with_word(mode, label)
+  return function(opts)
+    if vim.bo.filetype == "trouble" then
+      return
+    end
+    local word = vim.fn.expand("<cword>"):gsub("[{}]", "")
+    if word == "" then
+      return
+    end
+    ---@diagnostic disable-next-line: inject-field, undefined-field
+    opts.title = style:format(icons[mode] or "", label, word) .. " {count}"
+  end
+end
+
 for _, mode in ipairs({ "incoming_calls", "outgoing_calls" }) do
+  local label = Util.camel(mode, " ")
   M.config.modes["lsp_" .. mode] = {
     mode = "lsp_base",
-    title = "{hl:Title}" .. Util.camel(mode, " ") .. "{hl} {count}",
-    desc = Util.camel(mode, " "),
+    title = "{hl:Title}" .. label .. "{hl} {count}",
+    config = with_word(mode, label),
+    desc = label,
     source = "lsp." .. mode,
     format = "{kind_icon} {text:ts} {pos} {hl:Title}{item.client:Title}{hl}",
   }
 end
 
 for _, mode in ipairs({ "definitions", "references", "implementations", "type_definitions", "declarations", "command" }) do
+  local label = Util.camel(mode, " ")
   M.config.modes["lsp_" .. mode] = {
     auto_jump = true,
     mode = "lsp_base",
-    title = "{hl:Title}" .. Util.camel(mode, " ") .. "{hl} {count}",
+    title = "{hl:Title}" .. label .. "{hl} {count}",
+    config = with_word(mode, label),
     source = "lsp." .. mode,
-    desc = Util.camel(mode, " "):lower(),
+    desc = label:lower(),
   }
 end
 

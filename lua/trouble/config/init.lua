@@ -12,6 +12,7 @@ local M = {}
 ---@field formatters? table<string,trouble.Formatter> custom formatters
 ---@field filters? table<string, trouble.FilterFn> custom filters
 ---@field sorters? table<string, trouble.SorterFn> custom sorters
+---@field title? string
 local defaults = {
   debug = false,
   auto_close = false, -- auto close when there are no items

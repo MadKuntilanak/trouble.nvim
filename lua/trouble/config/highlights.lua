@@ -88,6 +88,10 @@ function M.source(source, links)
     Source = "TroubleSource",
     Pos = "TroublePos",
     Count = "TroubleCount",
+
+    TitleIcon = "Special",
+    TitleWord = "Function",
+    TitleSep = "Comment",
   }, links or {})
   M.link(links, "Trouble" .. Util.camel(source))
 end
