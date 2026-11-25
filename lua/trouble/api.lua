@@ -1,4 +1,3 @@
--- local Actions = require("trouble.config.actions")
 local Config = require("trouble.config")
 local Util = require("trouble.util")
 local View = require("trouble.view")
@@ -46,6 +45,7 @@ end
 function M.open(opts)
   opts = opts or {}
   local view, _opts = M._find_last(opts)
+  ---@cast _opts trouble.Mode|{new?: boolean}
   if not view or _opts.new then
     if not _opts.mode then
       return Util.error("No mode specified")
@@ -141,20 +141,23 @@ function M.get_items(opts)
   return ret
 end
 
--- Re-opens the last closed Trouble view (or last closed view for a given mode).
--- Restores: mode, window layout, active filters, and cursor position.
+-- Re-opens the last closed view, or the last closed view of a mode.
+-- Restores mode, window options, filters and cursor position.
 --
--- Examples:
 --   :Trouble resume
 --   :Trouble resume mode=diagnostics
 --
----@param opts? trouble.Mode|string
+-- Only the given opts are passed on. `Config.get` would return the whole
+-- default config and override everything that was stored.
+---@param opts? {mode?: string}|string
 ---@return trouble.View?
 function M.resume(opts)
-  opts = Config.get(opts)
+  if type(opts) == "string" then
+    opts = { mode = opts }
+  end
+  opts = opts or {}
   if opts.mode == "last" then
     opts.mode = M.last_mode
-    opts = Config.get(opts)
   end
   return View.resume(opts)
 end
@@ -175,7 +178,7 @@ function M.statusline(opts)
     indent = false,
   })
   local status = nil ---@type string?
-  ---@cast opts trouble.Mode
+  ---@cast opts trouble.Mode|{hl_group?:string}
 
   local s = Spec.section(opts)
   s.max_items = s.max_items or opts.max_items

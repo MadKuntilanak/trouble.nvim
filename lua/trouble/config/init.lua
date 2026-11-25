@@ -116,6 +116,7 @@ local defaults = {
   modes = {
     -- sources define their own modes, which you can use directly,
     -- or override like in the example below
+    ---@diagnostic disable-next-line: missing-fields
     lsp_references = {
       -- some modes are configurable, see the source code for more details
       params = {
@@ -125,6 +126,7 @@ local defaults = {
     -- The LSP base mode for:
     -- * lsp_definitions, lsp_references, lsp_implementations
     -- * lsp_type_definitions, lsp_declarations, lsp_command
+    ---@diagnostic disable-next-line: missing-fields
     lsp_base = {
       params = {
         -- don't include the current location in the results
@@ -132,6 +134,7 @@ local defaults = {
       },
     },
     -- more advanced example that extends the lsp_document_symbols
+    ---@diagnostic disable-next-line: missing-fields
     symbols = {
       desc = "document symbols",
       mode = "lsp_document_symbols",
@@ -255,7 +258,7 @@ function M.setup(opts)
   vim.schedule(function()
     for mode, mode_opts in pairs(options.modes) do
       if mode_opts.auto_open then
-        require("trouble.view").new(M.get(mode))
+        require("trouble.view").new(M.get(mode) --[[@as trouble.Mode]])
       end
     end
   end)

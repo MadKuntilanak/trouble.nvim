@@ -1,3 +1,4 @@
+local Filter = require("trouble.filter")
 local Format = require("trouble.format")
 local Main = require("trouble.view.main")
 local Preview = require("trouble.view.preview")
@@ -17,8 +18,8 @@ local Window = require("trouble.view.window")
 ---@field renderer trouble.Render
 ---@field first_render trouble.Promise
 ---@field first_update trouble.Promise
----@field moving uv_timer_t
----@field clicked uv_timer_t
+---@field moving uv.uv_timer_t
+---@field clicked uv.uv_timer_t
 ---@field state table<string,any>
 ---@field _filters table<string, trouble.ViewFilter>
 ---@field private _main? trouble.Main
@@ -35,23 +36,40 @@ M._auto = {}
 ---@type table<string, trouble.Render.Location>
 M._last = {}
 
---- History of closed views, used by `M.resume()`.
---- Stores enough state to re-open a view as it was before closing.
 ---@class trouble.View.Snapshot
----@field opts trouble.Mode              Deep-copy of view opts at close time
----@field cursor number[]                Cursor row/col inside the trouble buffer
----@field loc? trouble.Render.Location  Item the cursor was on
----@field filters table<string, trouble.ViewFilter>  Active filters at close time
+---@field opts trouble.Mode
+---@field cursor number[]
+---@field loc? trouble.Render.Location
+---@field filters table<string, trouble.ViewFilter>
+---@field sections_data {items: trouble.Item[], node?: trouble.Node}[]
 
---- Keyed by mode string → most-recent snapshot for that mode.
---- The special key "" holds the most-recently closed view of *any* mode,
---- so `Trouble resume` with no argument always works.
----@type table<string, trouble.View.Snapshot>
+--- Last closed view per mode, per main window id, and `""` for any mode.
+---@type table<string|number, trouble.View.Snapshot>
 M._history = {}
 
 M.MOVING_DELAY = 4000
 
-local uv = vim.loop or vim.uv
+local uv = vim.uv or vim.loop
+
+---@param t table<string, any>
+---@return string[]
+local function sorted_ids(t)
+  local ids = vim.tbl_keys(t)
+  table.sort(ids)
+  return ids
+end
+
+---@param filters table<string, trouble.ViewFilter>
+---@return trouble.Filter[]?
+local function active_filters(filters)
+  local ids = sorted_ids(filters)
+  if #ids == 0 then
+    return
+  end
+  return vim.tbl_map(function(id)
+    return filters[id].filter
+  end, ids)
+end
 
 ---@param opts trouble.Mode
 function M.new(opts)
@@ -61,6 +79,8 @@ function M.new(opts)
   self.state = {}
   self.opts = opts or {}
   self._filters = {}
+  self.moving = assert(uv.new_timer())
+  self.clicked = assert(uv.new_timer())
   self.first_render = Promise.new(function() end)
   self.first_update = Promise.new(function() end)
   self.opts.win = vim.tbl_deep_extend("force", self.opts.win or {}, Window.FOLDS)
@@ -68,9 +88,6 @@ function M.new(opts)
     self:on_mount()
   end
   self.opts.win.on_close = function()
-    -- Always close preview when trouble window is closed, regardless of how
-    -- it was triggered (q keymap, :q, WinClosed, etc). This is the last-resort
-    -- safety net for cases where WinLeave fires late or out of order.
     Preview.close()
     if not self.opts.auto_open then
       for _, section in ipairs(self.sections) do
@@ -91,7 +108,7 @@ function M.new(opts)
   self.win = Window.new(self.opts.win)
   self.opts.win = self.win.opts
 
-  self.preview_win = Window.new(self.opts.preview) or nil
+  self.preview_win = Window.new(self.opts.preview)
 
   self.renderer = Render.new(self.opts, {
     padding = vim.tbl_get(self.opts.win, "padding", "left") or 0,
@@ -102,13 +119,11 @@ function M.new(opts)
   self.follow = Util.throttle(M.follow, Util.throttle_opts(self.opts.throttle.follow, { ms = 100 }))
 
   if self.opts.auto_open then
-    -- add to a table, so that the view doesn't gc
+    -- keep a reference so the view isn't gc'ed
     table.insert(M._auto, self)
     self:listen()
     self:refresh()
   end
-  self.moving = uv.new_timer()
-  self.clicked = uv.new_timer()
   return self
 end
 
@@ -149,21 +164,32 @@ function M:on_mount()
   }
 
   self:listen()
+
+  local _self = Util.weak(self)
+
+  local preview = Util.throttle(
+    M._auto_preview,
+    Util.throttle_opts(self.opts.throttle.preview, {
+      ms = 100,
+      debounce = true,
+    })
+  )
+
   self.win:on("WinLeave", function()
+    if not _self() then
+      return true
+    end
     vim.schedule(function()
-      -- If the trouble window is already closed (e.g. user pressed q), skip —
-      -- on_close already handled Preview.close(). Without this guard the
-      -- deferred WinLeave can fire after close and leave preview orphaned in
-      -- the reverse race: q closes trouble, then a pending CursorMoved or
-      -- WinLeave callback re-opens / fails to close the preview.
-      if not self.win:valid() then
+      local this = _self()
+      -- already closed, `on_close` handled the preview
+      if not this or not this.win:valid() then
         return
       end
-      if self.opts.preview.type == "main" and self.clicked:is_active() and Preview.is_open() then
-        local main = self.preview_win.opts.win
-        local preview = self.preview_win.win
-        if main and preview and vim.api.nvim_win_is_valid(main) and vim.api.nvim_win_is_valid(preview) then
-          local view = vim.api.nvim_win_call(preview, vim.fn.winsaveview)
+      if this.opts.preview.type == "main" and this.clicked:is_active() and Preview.is_open() then
+        local main = this.preview_win.opts.win
+        local pwin = this.preview_win.win
+        if main and pwin and vim.api.nvim_win_is_valid(main) and vim.api.nvim_win_is_valid(pwin) then
+          local view = vim.api.nvim_win_call(pwin, vim.fn.winsaveview)
           vim.api.nvim_win_call(main, function()
             vim.fn.winrestview(view)
           end)
@@ -174,40 +200,27 @@ function M:on_mount()
     end)
   end)
 
-  local _self = Util.weak(self)
-
-  local preview = Util.throttle(
-    M.preview,
-    Util.throttle_opts(self.opts.throttle.preview, {
-      ms = 100,
-      debounce = true,
-    })
-  )
-
   self.win:on("CursorMoved", function()
     local this = _self()
     if not this then
       return true
     end
-    M._last[self.opts.mode or ""] = self:at()
-    if this.opts.auto_preview then
-      local loc = this:at()
-      if loc and loc.item then
-        preview(this, loc.item)
-      end
+    local loc = this:at()
+    if loc.node then
+      M._last[this.opts.mode or ""] = loc
+    end
+    if this.opts.auto_preview and loc.item then
+      preview(this)
     end
   end)
 
   if self.opts.follow then
-    -- tracking of the current item
     self.win:on("CursorMoved", function()
       local this = _self()
       if not this then
         return true
       end
-      if this.win:valid() then
-        this:follow()
-      end
+      this:follow()
     end, { buffer = false })
   end
 
@@ -224,26 +237,25 @@ function M:on_mount()
     end
   end, { pattern = "foldlevel", buffer = false })
 
-  -- Re-open preview when trouble window is resized (e.g. expanded upward),
-  -- so the preview window repositions itself relative to the new trouble height.
+  -- A float preview is positioned relative to the trouble window,
+  -- so reopen it when the trouble window is resized.
   self.win:on("WinResized", function()
     local this = _self()
     if not this then
       return true
     end
-    if not this.win:valid() then
+    if this.opts.preview.type == "main" or this.preview_win.opts.type ~= "float" then
       return
     end
-    -- Only act when our trouble window was among the resized windows
-    local resized = vim.v.event and vim.v.event.windows or {}
-    if not vim.tbl_contains(resized, this.win.win) then
+    if not (this.win:valid() and Preview.is_open()) then
       return
     end
-    if Preview.is_open() then
-      local loc = this:at()
-      if loc and loc.item then
-        preview(this, loc.item)
-      end
+    if not vim.tbl_contains(vim.v.event.windows or {}, this.win.win) then
+      return
+    end
+    if this:at().item then
+      Preview.close()
+      preview(this)
     end
   end, { buffer = false })
 
@@ -301,46 +313,48 @@ function M:jump(item, opts)
   end
 
   if not (item.buf or item.filename) then
-    Util.warn("No buffer or filename for item")
-    return
+    return Util.warn("No buffer or filename for item")
   end
 
   item.buf = item.buf or vim.fn.bufadd(item.filename)
 
-  -- if not vim.api.nvim_buf_is_loaded(item.buf) then
-  --   vim.fn.bufload(item.buf)
-  -- end
   if not vim.bo[item.buf].buflisted then
     vim.bo[item.buf].buflisted = true
   end
-  local main = self:main()
-  local win = main and main.win or 0
 
+  local main = self:main()
+  local win = main and main.win or vim.api.nvim_get_current_win()
+
+  -- save position in jump list
   vim.api.nvim_win_call(win, function()
-    -- save position in jump list
     vim.cmd("normal! m'")
   end)
 
+  local split_cmd
   if opts.split then
-    vim.api.nvim_win_call(win, function()
-      vim.cmd((opts.aboveleft and "aboveleft ") .. "split")
-      win = vim.api.nvim_get_current_win()
-    end)
+    split_cmd = (opts.aboveleft and "aboveleft " or "") .. "split"
   elseif opts.vsplit then
+    split_cmd = "vsplit"
+  end
+
+  if split_cmd then
     vim.api.nvim_win_call(win, function()
-      vim.cmd("vsplit")
+      vim.cmd(split_cmd)
       win = vim.api.nvim_get_current_win()
     end)
   end
 
   vim.api.nvim_win_set_buf(win, item.buf)
   vim.api.nvim_set_current_win(win)
-  vim.api.nvim_win_set_cursor(win, item.pos)
+  -- the buffer may have changed since the item was created
+  pcall(vim.api.nvim_win_set_cursor, win, item.pos)
 
   vim.schedule(function()
-    vim.api.nvim_win_call(win, function()
-      vim.cmd("norm! zzzv")
-    end)
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_call(win, function()
+        vim.cmd("norm! zzzv")
+      end)
+    end
   end)
   return item
 end
@@ -357,6 +371,18 @@ function M:preview(item)
   end
 
   return Preview.open(self, item, { scratch = self.opts.preview.scratch })
+end
+
+-- Runs from a debounced timer, so the view may be closed by now.
+-- The item is read again for the same reason.
+function M:_auto_preview()
+  if not self.win:valid() then
+    return
+  end
+  local item = self:at().item
+  if item then
+    Preview.open(self, item, { scratch = self.opts.preview.scratch })
+  end
 end
 
 function M:main()
@@ -381,13 +407,7 @@ end
 
 ---@param cursor? number[]
 function M:at(cursor)
-  if not self.win.buf or type(self.win.buf) ~= "number" then
-    return {}
-  end
-  if not vim.api.nvim_buf_is_valid(self.win.buf) then
-    return {}
-  end
-  if not self.win.win or not vim.api.nvim_win_is_valid(self.win.win) then
+  if not self.win:valid() then
     return {}
   end
   cursor = cursor or vim.api.nvim_win_get_cursor(self.win.win)
@@ -395,9 +415,10 @@ function M:at(cursor)
 end
 
 function M:selection()
-  if not vim.fn.mode():lower():find("v") then
-    local ret = self:at()
-    return ret.node and { ret.node } or {}
+  -- "v", "V" or CTRL-V
+  if not vim.fn.mode():lower():find("[v\22]") then
+    local node = self:at().node
+    return node and { node } or {}
   end
   vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<esc>", true, false, true), "x", false)
 
@@ -405,9 +426,11 @@ function M:selection()
   local to = vim.api.nvim_buf_get_mark(self.win.buf, ">")[1]
   ---@type trouble.Node[]
   local ret = {}
+  local seen = {}
   for row = from, to do
     local node = self.renderer:at(row).node
-    if not vim.tbl_contains(ret, node) then
+    if node and not seen[node] then
+      seen[node] = true
       ret[#ret + 1] = node
     end
   end
@@ -429,28 +452,29 @@ end
 
 ---@param opts? {idx?: number, up?:number, down?:number, jump?:boolean}
 function M:move(opts)
-  -- start the moving timer. Will stop any previous timers,
-  -- so this acts as a debounce.
-  -- This is needed to prevent `follow` from being called
+  -- restarting the timer acts as a debounce, `follow` is skipped meanwhile
   self.moving:start(M.MOVING_DELAY, 0, function() end)
 
   opts = opts or {}
   local cursor = vim.api.nvim_win_get_cursor(self.win.win)
-  local from = 1
-  local to = vim.api.nvim_buf_line_count(self.win.buf)
+  local last = vim.api.nvim_buf_line_count(self.win.buf)
+  local from, to, step = 1, last, 1
   local todo = opts.idx or opts.up or opts.down or 0
 
+  if todo == 0 then
+    return
+  end
+
   if opts.idx and opts.idx < 0 then
-    from, to = to, 1
-    todo = math.abs(todo)
+    from, to, step = last, 1, -1
+    todo = -todo
   elseif opts.down then
     from = cursor[1] + 1
   elseif opts.up then
-    from = cursor[1] - 1
-    to = 1
+    from, to, step = cursor[1] - 1, 1, -1
   end
 
-  for row = from, to, from > to and -1 or 1 do
+  for row = from, to, step do
     local info = self.renderer:at(row)
     if info.item and info.first_line then
       todo = todo - 1
@@ -470,7 +494,7 @@ end
 function M:action(action, opts)
   action = Spec.action(action)
   self:wait(function()
-    local at = self:at() or {}
+    local at = self:at()
     action.action(self, {
       item = at.item,
       node = at.node,
@@ -485,18 +509,16 @@ function M:refresh(opts)
   if not (opts.opening or self.win:valid() or self.opts.auto_open) then
     return
   end
-  -- When _frozen is set (resume path), skip all source queries and just
-  -- trigger an update/render with the already-loaded items.
-  if self._frozen then
-    return Promise.all(vim.tbl_map(function(section)
+  return Promise.all(vim.tbl_map(function(section)
+    if self._frozen then
+      -- resumed view, reuse the stored items
       return Promise.new(function(resolve)
-        section:update()
+        if opts.update ~= false then
+          section:update()
+        end
         resolve(section)
       end)
-    end, self.sections))
-  end
-  ---@param section trouble.Section
-  return Promise.all(vim.tbl_map(function(section)
+    end
     return section:refresh(opts)
   end, self.sections))
 end
@@ -510,18 +532,15 @@ function M:help()
   ---@type string[]
   local keys = vim.tbl_keys(self.win.keys)
   table.sort(keys, function(a, b)
-    local lowa = string.lower(a)
-    local lowb = string.lower(b)
+    local lowa, lowb = a:lower(), b:lower()
     if lowa == lowb then
-      return a > b -- Preserve original order for equal strings
-    else
-      return lowa < lowb
+      return a > b
     end
+    return lowa < lowb
   end)
   for _, key in ipairs(keys) do
-    local desc = self.win.keys[key]
     text:append("  - ", "@punctuation.special.markdown")
-    text:append(key, "Special"):append(" "):append(desc):nl()
+    text:append(key, "Special"):append(" "):append(self.win.keys[key]):nl()
   end
   text:trim()
 
@@ -533,7 +552,6 @@ function M:help()
   })
   win:open():focus()
   text:render(win.buf)
-  vim.bo[win.buf].modifiable = false
 
   win:map("<esc>", win.close)
   win:map("q", win.close)
@@ -544,12 +562,8 @@ function M:is_open()
 end
 
 function M:open()
-  -- Close it first, whatever it is.
   self:close()
 
-  if self.win:valid() then
-    return self
-  end
   self
     :refresh({ update = false, opening = true })
     :next(function()
@@ -560,7 +574,7 @@ function M:open()
             local main = self:main()
             local bufname = main and main.buf and vim.api.nvim_buf_get_name(main.buf) or ""
             Util.warn({
-              "No results for **" .. self.opts.mode .. "**",
+              "No results for **" .. tostring(self.opts.mode) .. "**",
               "Buffer: " .. bufname,
             })
           end
@@ -580,34 +594,41 @@ function M:open()
   return self
 end
 
-function M:close()
-  -- Only save a resume snapshot when the trouble window was actually open
-  -- and visible. If close() is called from the auto_jump path (count == 1,
-  -- window never opened), there is nothing meaningful to resume.
-  if self.win:valid() then
-    local sections_data = {}
-    for i, section in ipairs(self.sections) do
-      sections_data[i] = {
-        items = section.items,
-        node = section.node,
-      }
+function M:_save_history()
+  local sections_data = {}
+  for i, section in ipairs(self.sections) do
+    sections_data[i] = { items = section.items, node = section.node }
+  end
+
+  local snapshot = {
+    opts = vim.deepcopy(self.opts),
+    cursor = vim.api.nvim_win_get_cursor(self.win.win),
+    loc = self:at(),
+    filters = vim.deepcopy(self._filters),
+    sections_data = sections_data,
+  }
+
+  -- drop entries of windows that no longer exist
+  for key in pairs(M._history) do
+    if type(key) == "number" and not vim.api.nvim_win_is_valid(key) then
+      M._history[key] = nil
     end
-    local snapshot = {
-      opts = vim.deepcopy(self.opts),
-      cursor = vim.api.nvim_win_get_cursor(self.win.win),
-      loc = self:at(),
-      filters = vim.deepcopy(self._filters),
-      sections_data = sections_data,
-    }
-    local mode = self.opts.mode or ""
-    M._history[mode] = snapshot
-    M._history[""] = snapshot
-    M._history[self:main().win] = snapshot
+  end
+
+  M._history[self.opts.mode or ""] = snapshot
+  M._history[""] = snapshot
+  M._history[self:main().win] = snapshot
+end
+
+function M:close()
+  -- nothing to resume when the window was never shown or is empty
+  if self.win:valid() and self:count() > 0 then
+    self:_save_history()
   end
 
   Preview.close()
 
-  if self.win.win and vim.api.nvim_win_is_valid(self.win.win) and vim.api.nvim_get_current_win() == self.win.win then
+  if vim.api.nvim_get_current_win() == self.win.win then
     self:goto_main()
   end
 
@@ -615,104 +636,73 @@ function M:close()
   return self
 end
 
---- Resume the last closed Trouble view, or a specific mode's last session.
----
---- Usage from command line / keymaps:
----   :Trouble resume                   -- re-open whatever was closed last
----   :Trouble resume mode=diagnostics  -- re-open last diagnostics session
----
---- The view is re-opened with:
----   - the same mode and window opts (type, position, size, …)
----   - the same active filters
----   - the cursor restored to the same item it was on
----
----@param opts? {mode?: string}  Optional override; if omitted uses last-closed
-function M:resume(opts)
+--- Reopen the last closed view, or the last one of `opts.mode`.
+--- The stored items are reused, sources are not queried again.
+--- `opts` are only the values to override on top of the stored ones.
+---@param opts? {mode?: string}
+function M.resume(opts)
   opts = opts or {}
 
-  local curwin = vim.api.nvim_get_current_win()
   local snap
-
-  local key = opts.mode or ""
-  snap = M._history[curwin] or M._history[key]
-
-  if not snap then
-    if key ~= "" then
-      snap = M._history[""]
-    end
-    if not snap then
-      Util.warn("No previous Trouble session to resume" .. (key ~= "" and (" for mode: " .. key) or ""))
-      return
-    end
+  if opts.mode then
+    snap = M._history[opts.mode]
+  else
+    snap = M._history[vim.api.nvim_get_current_win()] or M._history[""]
   end
 
-  -- Merge caller opts on top of the saved opts so the user can tweak things
-  -- like win.position without losing the rest of the session state.
+  if not snap then
+    Util.warn("No previous Trouble session to resume" .. (opts.mode and (" for mode: " .. opts.mode) or ""))
+    return
+  end
+
   ---@type trouble.Mode
-  local restored_opts = vim.tbl_deep_extend("force", vim.deepcopy(snap.opts), opts)
+  local restored = vim.tbl_deep_extend("force", vim.deepcopy(snap.opts), opts)
 
-  -- If a view for this mode is already open just focus it.
-  if not snap then
-    local existing = M.get({ mode = restored_opts.mode, open = true })
-    if #existing > 0 then
-      local view = existing[1].view
-      if view.win:valid() then
-        view.win:focus()
-        return view
-      end
+  if restored.mode then
+    local existing = M.get({ mode = restored.mode, open = true })[1]
+    if existing and existing.view.win:valid() then
+      existing.view.win:focus()
+      return existing.view
     end
   end
 
-  restored_opts.auto_refresh = false
-  restored_opts.auto_jump = false
+  -- keep sources from overwriting the stored items until the first render
+  local auto_refresh = restored.auto_refresh
+  restored.auto_refresh = false
+  restored.auto_jump = false
+  restored.auto_open = false
 
-  local view = M.new(restored_opts)
+  local view = M.new(restored)
 
-  -- Restore filters.
   view._filters = vim.deepcopy(snap.filters)
-  local filters = vim.tbl_count(view._filters) > 0
-      and vim.tbl_map(function(f)
-        return f.filter
-      end, vim.tbl_values(view._filters))
-    or nil
+  local filters = active_filters(view._filters)
 
-  -- Inject frozen items + pre-built node tree directly into each section.
-  -- This bypasses section:refresh() entirely so the LSP is never re-queried.
   for i, section in ipairs(view.sections) do
-    local sd = snap.sections_data and snap.sections_data[i]
-    if sd then
-      section.items = sd.items or {}
-      section.node = sd.node
+    local data = snap.sections_data and snap.sections_data[i]
+    if data then
+      section.items = data.items or {}
+      section.node = data.node
     end
     section.filter = filters
   end
 
-  -- Restore cursor position via M._last so render() picks it up.
-  if snap.loc and snap.loc.node then
-    M._last[restored_opts.mode or ""] = snap.loc
+  -- `render` restores the cursor from `M._last`
+  local by_loc = restored.restore and snap.loc and snap.loc.node
+  if by_loc then
+    M._last[restored.mode or ""] = snap.loc
   end
 
-  -- Freeze the view so M:refresh() skips LSP queries and just re-renders
-  -- the already-injected items. Unfrozen after the first render completes.
   view._frozen = true
-
-  -- Open without triggering a source refresh — pass update=false so the
-  -- opening path skips section:refresh() and goes straight to render.
-  -- view:open() internally calls refresh({opening=true}) which calls
-  -- section:refresh() → we override that by pre-filling items above and
-  -- ensuring auto_refresh=false so nothing clobbers our frozen data.
   view:open()
   view:wait(function()
     if view.win:valid() then
-      local row = snap.cursor[1]
-      local max = vim.api.nvim_buf_line_count(view.win.buf)
-      if row > max then
-        row = max
+      if not by_loc then
+        local row = math.min(snap.cursor[1], vim.api.nvim_buf_line_count(view.win.buf))
+        pcall(vim.api.nvim_win_set_cursor, view.win.win, { row, snap.cursor[2] })
       end
       view.win:focus()
     end
-    -- Unfreeze: future manual :Trouble refresh or auto_refresh events
-    -- are allowed again after the resume render is done.
+    view.opts.auto_refresh = auto_refresh
     view._frozen = false
   end)
 
@@ -732,7 +722,9 @@ end
 function M:flatten()
   local ret = {}
   for _, section in ipairs(self.sections) do
-    section.node:flatten(ret)
+    if section.node then
+      section.node:flatten(ret)
+    end
   end
   return ret
 end
@@ -777,12 +769,7 @@ function M:filter(filter, opts)
     self._filters[view_filter.id] = view_filter
   end
 
-  local filters = vim.tbl_count(self._filters) > 0
-      and vim.tbl_map(function(f)
-        return f.filter
-      end, vim.tbl_values(self._filters))
-    or nil
-
+  local filters = active_filters(self._filters)
   for _, section in ipairs(self.sections) do
     section.filter = filters
   end
@@ -791,7 +778,8 @@ end
 
 function M:header()
   local ret = {} ---@type trouble.Format[][]
-  for _, filter in pairs(self._filters) do
+  for _, id in ipairs(sorted_ids(self._filters)) do
+    local filter = self._filters[id]
     local data = vim.tbl_deep_extend("force", {
       filter = filter.filter,
     }, type(filter.filter) == "table" and filter.filter or {}, filter.data or {})
@@ -810,7 +798,6 @@ end
 ---@param data table<string,any>
 function M:format(template, data)
   data.source = "view"
-  assert(self.opts, "opts is nil")
   return Format.format(template, { item = data, opts = self.opts })
 end
 
@@ -826,15 +813,13 @@ function M:render()
     loc = restore_loc
   end
 
-  -- render sections
   self.renderer:clear()
   self.renderer:nl()
   for _ = 1, vim.tbl_get(self.opts.win, "padding", "top") or 0 do
     self.renderer:nl()
   end
 
-  local header = self:header()
-  for _, h in ipairs(header) do
+  for _, h in ipairs(self:header()) do
     for _, ff in ipairs(h) do
       self.renderer:append(ff.text, ff)
     end
@@ -844,19 +829,20 @@ function M:render()
   self.renderer:sections(self.sections)
   self.renderer:trim()
 
-  -- calculate initial folds
+  -- initial folds, render again to apply them
   if self.renderer.foldlevel == nil then
     local level = vim.wo[self.win.win].foldlevel
     if level < self.renderer.max_depth then
       self.renderer:fold_level({ level = level })
-      -- render again to apply folds
-      return self:render()
+      return M.render(self)
     end
   end
 
-  vim.schedule(function()
-    self.first_render.resolve()
-  end)
+  if self.first_render:is_pending() then
+    vim.schedule(function()
+      self.first_render.resolve()
+    end)
+  end
 
   -- render extmarks and restore window view
   local view = vim.api.nvim_win_call(self.win.win, vim.fn.winsaveview)
@@ -874,73 +860,68 @@ function M:render()
     return
   end
 
-  -- fast exit when cursor is already on the right item
+  -- cursor is already on the right item
   local new_loc = self:at()
   if new_loc.node and loc.node and new_loc.node.id == loc.node.id then
     return
   end
 
-  -- Move cursor to the same item
-  local cursor = vim.api.nvim_win_get_cursor(self.win.win)
-  local item_row ---@type number?
-  if loc.node then
-    for row, l in pairs(self.renderer._locations) do
-      if loc.node:is(l.node) then
-        item_row = row
-        break
-      end
-    end
+  if not loc.node then
+    return
   end
 
-  -- Move cursor to the actual item when found
-  if item_row and item_row ~= cursor[1] then
-    vim.api.nvim_win_set_cursor(self.win.win, { item_row, cursor[2] })
-    return
+  -- move cursor to the previous item
+  local cursor = vim.api.nvim_win_get_cursor(self.win.win)
+  local locations = self.renderer._locations
+  for row = 1, self.renderer:height() do
+    local l = locations[row]
+    if l and loc.node:is(l.node) then
+      if row ~= cursor[1] then
+        vim.api.nvim_win_set_cursor(self.win.win, { row, cursor[2] })
+      end
+      return
+    end
   end
 end
 
--- When not in the trouble window, try to show the range
+-- when not in the trouble window, try to show the range
 function M:follow()
-  if not self.win:valid() then -- trouble is closed
+  if not self.win:valid() then
     return
   end
-  if self.moving:is_active() then -- dont follow when moving
+  if self.moving:is_active() then
     return
   end
-  local current_win = vim.api.nvim_get_current_win()
-  if current_win == self.win.win then -- inside the trouble window
+  if vim.api.nvim_get_current_win() == self.win.win then
     return
   end
-  local Filter = require("trouble.filter")
+
   local ctx = { opts = self.opts, main = self:main() }
   local fname = vim.api.nvim_buf_get_name(ctx.main.buf or 0)
   local loc = self:at()
 
-  -- check if we're already in the file group
+  -- only fall back to the group when the cursor is not in it yet
   local in_group = loc.node and loc.node.item and loc.node.item.filename == fname
 
   ---@type number[]|nil
-  local cursor_item = nil
-  local cursor_group = cursor_item
+  local cursor_item, cursor_group
+  local locations = self.renderer._locations
 
-  for row, l in pairs(self.renderer._locations) do
-    -- only return the group if we're not yet in the group
-    -- and the group's filename matches the current file
-    local is_group = not in_group and l.node and l.node.group and l.node.item and l.node.item.filename == fname
-    if is_group then
-      cursor_group = { row, 1 }
-    end
-
-    -- prefer a full match
-    local is_current = l.item and Filter.is(l.item, { range = true }, ctx)
-    if is_current then
-      cursor_item = { row, 1 }
+  for row = 1, self.renderer:height() do
+    local l = locations[row]
+    if l then
+      if not in_group and l.node and l.node.group and l.node.item and l.node.item.filename == fname then
+        cursor_group = { row, 1 }
+      end
+      -- prefer a full match
+      if l.item and Filter.is(l.item, { range = true }, ctx) then
+        cursor_item = { row, 1 }
+      end
     end
   end
 
   local cursor = cursor_item or cursor_group
   if cursor then
-    -- make sure the cursorline is visible
     vim.wo[self.win.win].cursorline = true
     vim.api.nvim_win_set_cursor(self.win.win, cursor)
     return true

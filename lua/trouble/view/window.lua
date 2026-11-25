@@ -31,6 +31,7 @@ local Util = require("trouble.util")
 ---@field bo? vim.bo
 ---@field minimal? boolean (defaults to true)
 ---@field win? number
+---@field scratch? boolean preview only: use a scratch buffer for unloaded files
 ---@field on_mount? fun(self: trouble.Window)
 ---@field on_close? fun(self: trouble.Window)
 
@@ -133,35 +134,56 @@ local minimal = {
   },
 }
 
+--- A size <= 1 is a fraction of the parent size.
+---@param size number
+---@param parent number
+local function scale(size, parent)
+  return size <= 1 and math.floor(parent * size) or size
+end
+
+--- Fractions are relative to the free space, negative values count from the end.
+---@param pos number
+---@param parent number
+---@param size number
+local function place(pos, parent, size)
+  local ret = math.abs(pos) <= 1 and math.floor((parent - size) * pos) or pos
+  return ret < 0 and (parent + ret) or ret
+end
+
 ---@param opts? trouble.Window.opts
 function M.new(opts)
   local self = setmetatable({}, M)
   self.id = next_id()
   opts = opts or {}
 
-  if opts.minimal == nil then
-    opts.minimal = opts.type ~= "main"
+  local is_minimal = opts.minimal
+  if is_minimal == nil then
+    is_minimal = opts.type ~= "main"
   end
 
-  opts = vim.tbl_deep_extend("force", {}, defaults, opts.minimal and minimal or {}, opts or {})
-  opts.type = opts.type or "split"
-  if opts.type == "split" then
-    opts.relative = opts.relative or "editor"
-    opts.position = opts.position or "bottom"
-    opts.size = opts.size or (opts.position == "bottom" or opts.position == "top") and 10 or 30
-    opts.win = opts.win or vim.api.nvim_get_current_win()
-  elseif opts.type == "float" then
-    opts.relative = opts.relative or "editor"
-    opts.size = opts.size or { width = 0.8, height = 0.8 }
-    opts.position = type(opts.position) == "table" and opts.position or { 0.5, 0.5 }
-  elseif opts.type == "main" then
-    opts.type = "float"
-    opts.relative = "win"
-    opts.position = { 0, 0 }
-    opts.size = { width = 1, height = 1 }
-    opts.wo.winhighlight = "Normal:Normal"
+  -- merged as a plain table, the fields below depend on the window type
+  ---@type table
+  local merged = vim.tbl_deep_extend("force", {}, defaults, is_minimal and minimal or {}, opts)
+  merged.minimal = is_minimal
+  merged.type = merged.type or "split"
+  if merged.type == "split" then
+    merged.relative = merged.relative or "editor"
+    merged.position = merged.position or "bottom"
+    merged.size = merged.size or (merged.position == "bottom" or merged.position == "top") and 10 or 30
+    merged.win = merged.win or vim.api.nvim_get_current_win()
+  elseif merged.type == "float" then
+    merged.relative = merged.relative or "editor"
+    merged.size = merged.size or { width = 0.8, height = 0.8 }
+    merged.position = type(merged.position) == "table" and merged.position or { 0.5, 0.5 }
+  elseif merged.type == "main" then
+    merged.type = "float"
+    merged.relative = "win"
+    merged.position = { 0, 0 }
+    merged.size = { width = 1, height = 1 }
+    merged.wo.winhighlight = "Normal:Normal"
   end
-  self.opts = opts
+  ---@cast merged trouble.Window.opts
+  self.opts = merged
   return self
 end
 
@@ -174,12 +196,13 @@ function M:parent_size()
   if self.opts.relative == "editor" or self.opts.relative == "cursor" then
     return { width = vim.o.columns, height = vim.o.lines }
   end
+  local win = self.opts.win or 0
   local ret = {
-    width = vim.api.nvim_win_get_width(self.opts.win),
-    height = vim.api.nvim_win_get_height(self.opts.win),
+    width = vim.api.nvim_win_get_width(win),
+    height = vim.api.nvim_win_get_height(win),
   }
   -- account for winbar
-  if vim.wo[self.opts.win].winbar ~= "" then
+  if vim.wo[win].winbar ~= "" then
     ret.height = ret.height - 1
   end
   return ret
@@ -188,15 +211,13 @@ end
 ---@param type "win" | "buf"
 function M:set_options(type)
   local opts = type == "win" and self.opts.wo or self.opts.bo
+  local target = type == "win" and { scope = "local", win = self.win } or { buf = self.buf }
   ---@diagnostic disable-next-line: no-unknown
   for k, v in pairs(opts or {}) do
     ---@diagnostic disable-next-line: no-unknown
-    local ok, err = pcall(vim.api.nvim_set_option_value, k, v, type == "win" and {
-      scope = "local",
-      win = self.win,
-    } or { buf = self.buf })
+    local ok, err = pcall(vim.api.nvim_set_option_value, k, v, target)
     if not ok then
-      Util.error("Error setting option `" .. k .. "=" .. v .. "`\n\n" .. err)
+      Util.error("Error setting option `" .. k .. "=" .. tostring(v) .. "`\n\n" .. err)
     end
   end
 end
@@ -237,18 +258,17 @@ function M:set_buf(buf)
 end
 
 function M:check_alien()
-  if self.win and vim.api.nvim_win_is_valid(self.win) then
-    local buf = vim.api.nvim_win_get_buf(self.win)
-    if buf ~= self.buf then
-      -- move the alien buffer to another window
-      local main = Main:get()
-      if main then
-        vim.api.nvim_win_set_buf(main.win, buf)
-        -- restore the trouble window
-        self:close()
-        self:open()
-      end
-    end
+  if not (self.win and vim.api.nvim_win_is_valid(self.win)) then
+    return
+  end
+  local buf = vim.api.nvim_win_get_buf(self.win)
+  if buf ~= self.buf then
+    -- move the alien buffer to the main window
+    local main = Main.get()
+    vim.api.nvim_win_set_buf(main.win, buf)
+    -- restore the trouble window
+    self:close()
+    self:open()
   end
 end
 
@@ -281,14 +301,13 @@ function M:mount_split(opts)
     self.opts.win = 0
   end
   local parent_size = self:parent_size()
+  local vertical = opts.position == "left" or opts.position == "right"
   local size = opts.size
   if type(size) == "table" then
-    size = opts.position == "left" or opts.position == "right" and size.width or size.height
+    size = vertical and size.width or size.height
   end
-  if size <= 1 then
-    local vertical = opts.position == "left" or opts.position == "right"
-    size = math.floor(parent_size[vertical and "width" or "height"] * size)
-  end
+  size = scale(size, parent_size[vertical and "width" or "height"])
+
   local cmd = split_commands[opts.relative][opts.position]
   Util.noautocmd(function()
     vim.api.nvim_win_call(opts.win, function()
@@ -308,18 +327,12 @@ function M:mount_float(opts)
     ---@diagnostic disable-next-line: no-unknown
     config[v] = opts[v]
   end
-  config.focusable = true
-  config.height = opts.size.height <= 1 and math.floor(parent_size.height * opts.size.height) or opts.size.height
-  config.width = opts.size.width <= 1 and math.floor(parent_size.width * opts.size.width) or opts.size.width
+  config.focusable = opts.focusable ~= false
+  config.height = scale(opts.size.height, parent_size.height)
+  config.width = scale(opts.size.width, parent_size.width)
   config.border = opts.border or "none"
-
-  config.row = math.abs(opts.position[1]) <= 1 and math.floor((parent_size.height - config.height) * opts.position[1])
-    or opts.position[1]
-  config.row = config.row < 0 and (parent_size.height + config.row) or config.row
-
-  config.col = math.abs(opts.position[2]) <= 1 and math.floor((parent_size.width - config.width) * opts.position[2])
-    or opts.position[2]
-  config.col = config.col < 0 and (parent_size.width + config.col) or config.col
+  config.row = place(opts.position[1], parent_size.height, config.height)
+  config.col = place(opts.position[2], parent_size.width, config.width)
   if config.relative ~= "win" then
     config.win = nil
   end
@@ -337,15 +350,16 @@ end
 ---@param fn fun(self:trouble.Window, event:{buf:number}):boolean?
 ---@param opts? vim.api.keyset.create_autocmd | {buffer: false, win?:boolean}
 function M:on(events, fn, opts)
-  opts = opts or {}
+  opts = vim.tbl_extend("force", {}, opts or {})
   if opts.win then
-    opts.pattern = self.win .. ""
+    opts.pattern = tostring(self.win)
     opts.win = nil
   elseif opts.buffer == nil then
     opts.buffer = self.buf
   elseif opts.buffer == false then
     opts.buffer = nil
   end
+  -- pattern and buffer are mutually exclusive
   if opts.pattern then
     opts.buffer = nil
   end
@@ -353,7 +367,7 @@ function M:on(events, fn, opts)
   opts.callback = function(e)
     local this = _self()
     if not this then
-      -- delete the autocmd
+      -- returning true deletes the autocmd
       return true
     end
     return fn(this, e)
@@ -366,6 +380,10 @@ end
 ---@param fn fun(self: trouble.Window):any
 ---@param opts? string|vim.keymap.set.Opts|{mode?:string}
 function M:map(key, fn, opts)
+  if not self:valid() then
+    error("Cannot create a keymap for an invalid window")
+  end
+
   opts = vim.tbl_deep_extend("force", {
     buffer = self.buf,
     nowait = true,
@@ -374,15 +392,13 @@ function M:map(key, fn, opts)
   local mode = opts.mode
   opts.mode = nil
   ---@cast opts vim.keymap.set.Opts
-  if not self:valid() then
-    error("Cannot create a keymap for an invalid window")
-  end
 
   self.keys[key] = opts.desc or key
   local weak_self = Util.weak(self)
   vim.keymap.set(mode, key, function()
-    if weak_self() then
-      return fn(weak_self())
+    local this = weak_self()
+    if this then
+      return fn(this)
     end
   end, opts)
 end

@@ -7,15 +7,18 @@ local ns = vim.api.nvim_create_namespace("trouble.treesitter")
 
 local TSHighlighter = vim.treesitter.highlighter
 
+local missing = {} ---@type table<string, true>
+
 local function wrap(name)
-  return function(_, win, buf, ...)
-    if not M.cache[buf] then
+  return function(ns_id, win, buf, ...)
+    local langs = M.cache[buf]
+    if not langs then
       return false
     end
-    for _, hl in pairs(M.cache[buf] or {}) do
+    for _, hl in pairs(langs) do
       if hl.enabled then
         TSHighlighter.active[buf] = hl.highlighter
-        TSHighlighter[name](_, win, buf, ...)
+        TSHighlighter[name](ns_id, win, buf, ...)
       end
     end
     TSHighlighter.active[buf] = nil
@@ -29,7 +32,7 @@ function M.setup()
   end
   M.did_setup = true
 
-  -- https://github.com/neovim/neovim/commit/5edbabdbec0ac3fba33be8afc008845130158583
+  -- newer nvim uses `on_range` instead of `on_line`
   if TSHighlighter._on_range then
     vim.api.nvim_set_decoration_provider(ns, {
       on_win = wrap("_on_win"),
@@ -53,48 +56,54 @@ end
 ---@param buf number
 ---@param regions trouble.LangRegions
 function M.attach(buf, regions)
-  M.setup()
-  M.cache[buf] = M.cache[buf] or {}
-  for lang in pairs(M.cache[buf]) do
-    M.cache[buf][lang].enabled = regions[lang] ~= nil
+  -- nothing to highlight and nothing to disable
+  if not M.cache[buf] and next(regions) == nil then
+    return
   end
 
-  for lang in pairs(regions) do
-    M._attach_lang(buf, lang, regions[lang])
+  M.setup()
+  M.cache[buf] = M.cache[buf] or {}
+
+  for _, hl in pairs(M.cache[buf]) do
+    hl.enabled = false
+  end
+
+  for lang, lang_regions in pairs(regions) do
+    M._attach_lang(buf, lang, lang_regions)
   end
 end
 
 ---@param buf number
----@param lang? string
+---@param lang string
+---@param regions number[][][]
 function M._attach_lang(buf, lang, regions)
-  lang = lang or "markdown"
   lang = lang == "markdown" and "markdown_inline" or lang
-
-  M.cache[buf] = M.cache[buf] or {}
-
-  if not M.cache[buf][lang] then
-    local ok, parser = pcall(vim.treesitter.languagetree.new, buf, lang)
-    if not ok then
-      local msg = "nvim-treesitter parser missing `" .. lang .. "`"
-      vim.notify_once(msg, vim.log.levels.WARN, { title = "trouble.nvim" })
-      return
-    end
-
-    parser:set_included_regions(vim.deepcopy(regions))
-    M.cache[buf][lang] = {
-      parser = parser,
-      highlighter = TSHighlighter.new(parser),
-    }
+  if missing[lang] then
+    return
   end
 
-  M.cache[buf][lang].enabled = true
-  local parser = M.cache[buf][lang].parser
-  parser:set_included_regions(vim.deepcopy(regions))
+  local entry = M.cache[buf][lang]
+  if not entry then
+    local ok, parser = pcall(vim.treesitter.languagetree.new, buf, lang)
+    if not ok then
+      missing[lang] = true
+      vim.notify_once(
+        "nvim-treesitter parser missing `" .. lang .. "`",
+        vim.log.levels.WARN,
+        { title = "trouble.nvim" }
+      )
+      return
+    end
+    entry = { parser = parser, highlighter = TSHighlighter.new(parser) }
+    -- only trouble's decoration provider should highlight this buffer
+    TSHighlighter.active[buf] = nil
+    M.cache[buf][lang] = entry
+  end
 
-  -- Force re-parse so all regions get highlighted, not just visible ones
-  pcall(function()
-    parser:parse(true) -- true = parse all regions, not just visible
-  end)
+  entry.enabled = true
+  entry.parser:set_included_regions(vim.deepcopy(regions))
+  -- parse everything, not only the visible part
+  pcall(entry.parser.parse, entry.parser, true)
 end
 
 return M

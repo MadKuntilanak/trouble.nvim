@@ -12,7 +12,6 @@ local Util = require("trouble.util")
 ---@field foldlevel? number
 ---@field foldenable boolean
 ---@field max_depth number
----@field view trouble.View
 ---@field opts trouble.Config
 local M = setmetatable({}, Text)
 M.__index = M
@@ -45,13 +44,8 @@ function M:fold(node, opts)
   if node:is_leaf() and node.parent then
     node = node.parent
   end
-  local id = node.id
   if action == "toggle" then
-    if self._folded[id] then
-      action = "open"
-    else
-      action = "close"
-    end
+    action = self._folded[node.id] and "open" or "close"
   end
   local stack = { node }
   while #stack > 0 do
@@ -59,6 +53,7 @@ function M:fold(node, opts)
     if not n:is_leaf() then
       if action == "open" then
         self._folded[n.id] = nil
+        -- parents must be open too
         local parent = n.parent
         while parent do
           self._folded[parent.id] = nil
@@ -79,28 +74,21 @@ end
 ---@param opts {level?:number, add?:number}
 function M:fold_level(opts)
   self.foldenable = true
-  self.foldlevel = self.foldlevel or (self.max_depth - 1) or 0
+  self.foldlevel = self.foldlevel or (self.max_depth - 1)
   if opts.level then
     self.foldlevel = opts.level
   end
   if opts.add then
     self.foldlevel = self.foldlevel + opts.add
   end
-  self.foldlevel = math.min(self.max_depth - 1, self.foldlevel)
-  self.foldlevel = math.max(0, self.foldlevel)
-  local stack = {}
-  for _, node in ipairs(self.root_nodes) do
-    table.insert(stack, node)
-  end
+  self.foldlevel = math.max(0, math.min(self.max_depth - 1, self.foldlevel))
+
+  local stack = vim.list_slice(self.root_nodes)
   while #stack > 0 do
     ---@type trouble.Node
     local node = table.remove(stack)
     if not node:is_leaf() then
-      if node:depth() > self.foldlevel then
-        self._folded[node.id] = true
-      else
-        self._folded[node.id] = nil
-      end
+      self._folded[node.id] = node:depth() > self.foldlevel or nil
       for _, c in ipairs(node.children or {}) do
         table.insert(stack, c)
       end
@@ -130,15 +118,18 @@ end
 ---@param section trouble.Section.opts
 ---@param nodes trouble.Node[]
 function M:section(section, nodes)
+  -- one indent for all nodes, `node` adds and removes symmetrically
+  local indent = Indent.new(self.opts.icons.indent)
   for n, node in ipairs(nodes) do
     table.insert(self.root_nodes, node)
     self.max_depth = math.max(self.max_depth, node:degree())
-    self:node(node, section, Indent.new(self.opts.icons.indent), n == #nodes)
+    self:node(node, section, indent, n == #nodes)
   end
 end
 
+---@param node trouble.Node
 function M:is_folded(node)
-  return self.foldenable and self._folded[node.id]
+  return self.foldenable and self._folded[node.id] or false
 end
 
 ---@param node trouble.Node
@@ -146,36 +137,35 @@ end
 ---@param indent trouble.Indent
 ---@param is_last boolean
 function M:node(node, section, indent, is_last)
-  node.folded = self:is_folded(node)
+  local folded = self:is_folded(node)
+  local depth = node:depth()
+  node.folded = folded
+
   if node.item then
     ---@type trouble.Indent.type
-    local symbol = self:is_folded(node) and "fold_closed"
-      or node:depth() == 1 and "fold_open"
-      or is_last and "last"
-      or "middle"
-    symbol = node:depth() == 1 and node:is_leaf() and "ws" or symbol
+    local symbol = folded and "fold_closed" or depth == 1 and "fold_open" or is_last and "last" or "middle"
+    if depth == 1 and node:is_leaf() then
+      symbol = "ws"
+    end
     indent:add(symbol)
-    -- self:item(node.item, node, section.groups[node.depth].format, true, indent)
     self:item(node, section, indent)
     indent:del()
   end
 
-  if self:is_folded(node) then
-    return -- don't render children
+  if folded then
+    return
   end
 
-  indent:add((is_last or node:depth() == 1) and "ws" or "top")
-
-  for i, n in ipairs(node.children or {}) do
-    self:node(n, section, indent, i == #node.children)
+  local children = node.children or {}
+  indent:add((is_last or depth == 1) and "ws" or "top")
+  for i, n in ipairs(children) do
+    self:node(n, section, indent, i == #children)
   end
-
   indent:del()
 end
 
 --- Returns the item and node at the given row.
---- For a group, only the node is returned.
---- To get the group item used for formatting, use `node.items[1]`.
+--- For a group only the node is set, its item is `node.item`.
 ---@param row number
 function M:at(row)
   return self._locations[row] or {}
@@ -214,17 +204,13 @@ function M:item(node, section, indent)
       local first ---@type string? first line
       if ff.hl == "ts" then
         local lang = item:get_lang()
-        if lang then
-          ff.hl = "ts." .. lang
-        else
-          ff.hl = nil
-        end
+        ff.hl = lang and ("ts." .. lang) or nil
       end
       for l, line in Util.lines(text) do
         if l == 1 then
           first = line
         else
-          -- PERF: most items are single line, so do heavy lifting only when more than one line
+          -- only multi-line items get here
           offset = offset or (self:col({ display = true }) - vim.fn.strdisplaywidth(first or ""))
           self:nl()
           self:append(indent)
@@ -240,10 +226,7 @@ function M:item(node, section, indent)
         })
       end
     end
-    -- NOTE:
-    -- * don't cache groups, since they can contain aggregates.
-    -- * don't cache multi-line items
-    -- * don't cache the indent part of the line
+    -- don't cache groups (aggregates), multi-line items or the indent part
     if not is_group and self:row() == row then
       item.cache[cache_key] =
         vim.list_slice(self._lines[#self._lines], self._opts.indent == false and 1 or (#indent + 1))

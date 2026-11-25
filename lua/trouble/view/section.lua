@@ -20,12 +20,13 @@ local Util = require("trouble.util")
 ---@field on_update? fun(self: trouble.Section)
 ---@field _refresh fun()
 local M = {}
+M.__index = M
 M._id = 0
 
 ---@param section trouble.Section.opts
 ---@param opts trouble.Config
 function M.new(section, opts)
-  local self = setmetatable({}, { __index = M })
+  local self = setmetatable({}, M)
   self.section = section
   self.opts = opts
   M._id = M._id + 1
@@ -52,15 +53,9 @@ end
 
 ---@param opts? {update?: boolean}
 function M:refresh(opts)
-  -- if self.section.source ~= "lsp.document_symbols" then
-  --   Util.debug("Section Refresh", {
-  --     id = self.id,
-  --     source = self.section.source,
-  --   })
-  -- end
   self.fetching = true
   return Promise.new(function(resolve)
-    self:main_call(function(main)
+    local called = self:main_call(function(main)
       local ctx = { opts = self.opts, main = main }
       self.finder(function(items)
         items = Filter.filter(items, self.section.filter, ctx)
@@ -76,6 +71,10 @@ function M:refresh(opts)
         resolve(self)
       end, ctx)
     end)
+    -- no usable main window: resolve now instead of waiting for the timeout
+    if not called then
+      resolve(self)
+    end
   end)
     :catch(Util.error)
     :timeout(2000)
@@ -85,37 +84,33 @@ function M:refresh(opts)
     end)
 end
 
+--- Runs `fn` in the main window.
 ---@param fn fun(main: trouble.Main)
+---@return boolean called
 function M:main_call(fn)
   local main = self:main()
 
-  if not main then
-    return
+  if not main or Preview.is_win(main.win) or not vim.api.nvim_win_is_valid(main.win) then
+    return false
   end
 
-  if Preview.is_win(main.win) then
-    return
+  if vim.api.nvim_win_get_buf(main.win) ~= main.buf then
+    Util.debug({
+      "Main window switched buffers",
+      "Main: " .. vim.fn.bufname(main.buf),
+      "Current: " .. vim.fn.bufname(vim.api.nvim_win_get_buf(main.win)),
+    })
+    return false
   end
 
-  local current = {
-    win = vim.api.nvim_get_current_win(),
-    buf = vim.api.nvim_get_current_buf(),
-    cursor = vim.api.nvim_win_get_cursor(0),
-  }
-
-  if vim.deep_equal(current, main) then
+  if vim.api.nvim_get_current_win() == main.win then
     fn(main)
-  elseif vim.api.nvim_win_get_buf(main.win) == main.buf then
+  else
     vim.api.nvim_win_call(main.win, function()
       fn(main)
     end)
-  else
-    Util.debug({
-      "Main window switched buffers",
-      "Main: " .. vim.api.nvim_buf_get_name(main.buf),
-      "Current: " .. vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(main.win)),
-    })
   end
+  return true
 end
 
 function M:update()
@@ -156,14 +151,14 @@ function M:listen()
         if not vim.api.nvim_buf_is_valid(e.buf) then
           return
         end
+        if e.event == "BufEnter" and vim.bo[e.buf].buftype ~= "" then
+          return
+        end
         if event.main then
           local main = this:main()
           if main and main.buf ~= e.buf then
             return
           end
-        end
-        if e.event == "BufEnter" and vim.bo[e.buf].buftype ~= "" then
-          return
         end
         this:_refresh()
       end,

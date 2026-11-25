@@ -24,16 +24,18 @@ function M.setup()
   M.set(M._find())
 end
 
----@param main trouble.Main
+---@param main? trouble.Main
 function M.set(main)
   M._main = main
 end
 
+---@param win? number
+---@param buf? number
 function M._valid(win, buf)
-  if not win or not buf then
+  if not (win and buf) then
     return false
   end
-  if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(buf) then
+  if not (vim.api.nvim_win_is_valid(win) and vim.api.nvim_buf_is_valid(buf)) then
     return false
   end
   if vim.api.nvim_win_get_buf(win) ~= buf then
@@ -45,10 +47,7 @@ function M._valid(win, buf)
   if vim.api.nvim_win_get_config(win).relative ~= "" then
     return false
   end
-  if vim.bo[buf].buftype ~= "" then
-    return false
-  end
-  return true
+  return vim.bo[buf].buftype == ""
 end
 
 ---@private
@@ -56,8 +55,7 @@ function M._find()
   local wins = vim.api.nvim_list_wins()
   table.insert(wins, 1, vim.api.nvim_get_current_win())
   for _, win in ipairs(wins) do
-    local b = vim.api.nvim_win_get_buf(win)
-    if M._valid(win, b) then
+    if M._valid(win, vim.api.nvim_win_get_buf(win)) then
       return M._info(win)
     end
   end
@@ -66,26 +64,24 @@ end
 ---@private
 ---@return trouble.Main
 function M._info(win)
-  local b = vim.api.nvim_win_get_buf(win)
+  local buf = vim.api.nvim_win_get_buf(win)
   return {
     win = win,
-    buf = b,
-    filename = vim.fs.normalize(vim.api.nvim_buf_get_name(b)),
+    buf = buf,
+    filename = vim.fs.normalize(vim.api.nvim_buf_get_name(buf)),
     cursor = vim.api.nvim_win_get_cursor(win),
   }
 end
 
 ---@param main? trouble.Main
----@return trouble.Main?
+---@return trouble.Main
 function M.get(main)
   main = main or M._main
 
-  local valid = main and M._valid(main.win, main.buf)
-
-  if not valid then
+  if not (main and M._valid(main.win, main.buf)) then
     main = M._find()
   end
-  -- Always return a main window even if it is not valid
+  -- always return something, even if no window is valid
   main = main or M._info(vim.api.nvim_get_current_win())
   main.cursor = vim.api.nvim_win_get_cursor(main.win)
   return main
